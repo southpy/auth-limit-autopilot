@@ -1,8 +1,9 @@
 # 架构设计文档 — 额度异动排障 Agent
 
-**版本**：v1.0
+**版本**：v2.0
 **日期**：2026-03-28
-**前置输入**：P0-P2 harness_score.md（Q1, 清晰度 4/5, 验证自动化 4/5）；P1 综合调研
+**前置输入**：P0-P2 harness_score.md（Q1, 清晰度 4/5, 验证自动化 4/5）；P1 综合调研；PRD agent_prd_limit_troubleshooting.md
+**变更说明**：v1.0→v2.0 修正架构模式（ReAct→DAG+条件分支）、HITL 定位（外部→架构内）、工具集（8→7 收窄 MVP）、状态机（对齐 PRD）
 
 ---
 
@@ -12,108 +13,158 @@
 
 ```
 Q: 任务步骤是否在设计时可确定？
-A: 部分可确定。排障主流程（意图识别→数据检索→交易定位→规则匹配→计算验证→话术生成）的六阶段骨架固定，但：
-   - 规则匹配阶段可能需要多轮数据检索（P0 案例中步骤 4→5→6→7 形成了循环）
-   - 不同场景类型（6 类）在"交易定位"后的分析路径不同
-→ 不是纯线性，有条件分支和可能的循环
+A: 是。PRD Core Workflow 定义了 7 步固定骨架：
+   意图识别→数据检索→交易定位→规则匹配→[补充检索]→计算验证→报告生成。
+   步骤 5（补充检索）是条件触发，但触发条件在设计时可穷举
+   （anomaly 类型需要 CCA 交易详情时触发）。
 
 Q: 步骤间是否需要动态判断/条件分支？
-A: 是。交易定位后，Agent 需要判断偏差类型（单笔差异 vs 相邻不连续 vs 隐性变动），不同偏差走不同分析路径。
+A: 是。交易定位后根据 anomaly 类型分支：
+   - 差异交易（diff ≠ 0）→ 规则匹配
+   - 无差异交易 → 直接生成无异常报告
+   规则匹配后：
+   - 未知交易码 → HITL CP-1
+   - 需要补充数据 → 补充检索
+   - 规则匹配完成 → 计算验证
 
 Q: 分支逻辑是否可编程表达？
-A: 部分可以。偏差类型分类（数值比较）可编程，但规则匹配和归因推理需要 LLM 语义理解。
-→ 需要 LLM 判断 → ReAct Loop 候选
+A: 是。所有分支条件均可编程判断：
+   - diff ≠ 0 → 数值比较
+   - 交易码是否在规则库中 → 查表
+   - 是否需要补充数据 → anomaly 类型枚举
+   - verified == true/false → 布尔判断
+→ 分支逻辑可编程 → Workflow DAG
+
+Q: 操作是否涉及不可逆/高风险行为？
+A: 否。全部为只读查询 + 生成报告。
+   但 MVP 阶段所有输出需业务人员审核（Supervised Autonomy），
+   HITL 是确定性 checkpoint，不是风险触发。
+→ Workflow DAG + HITL（Supervised Autonomy）
 ```
 
-### 选型：ReAct Loop
+### 选型：Workflow DAG + 条件分支 + HITL Checkpoints
 
-**选型理由**：排障本质是诊断问题——Agent 获取数据后需要推理偏差原因，推理结果可能触发新的数据检索需求（P0 案例中 4306 交易的详情查询就是推理驱动的），这正是 ReAct 的核心模式。六阶段骨架作为 Agent 的 system prompt 指导思路，但执行路径由推理结果动态决定。
+**v1.0 误判复盘**：v1.0 将 P0 案例中"步骤 4 发现需要新数据后触发步骤 5"解读为 ReAct 式的开放探索。PRD 的 Core Workflow 澄清了这一点——补充检索是已知的条件分支（规则匹配发现需要 CCA 交易详情时触发），不是 Agent 自主决定的探索行为。分支条件在设计时可穷举，属于分支状态机模式（参考文档 state-machine-patterns.md 模式 3），不需要 ReAct 的开放推理循环。
+
+**选型理由**：排障流程是顺序型 DAG，7 步逐步依赖（PRD Section 4）。LLM 负责意图识别和话术生成等语义理解环节，但流程编排由确定性代码控制。4 个 HITL checkpoint 是架构组成部分（CP-1 未知交易码、CP-2 计算验证失败、CP-3 输出审核、CP-4 超范围场景），确保 Supervised Autonomy 策略在架构层面强制执行。
 
 **不选其他模式的理由**：
 
-- 不选 Workflow DAG：P0 案例证明排障不是线性流水线——步骤 4 发现需要新数据后触发了步骤 5 的额外检索，这种"推理→发现缺口→补充检索→继续推理"的循环是 DAG 无法表达的。
-- 不选 Multi-Agent：当前只涉及额度排障单一领域，不存在需要并行的多领域专家。工具集预计 5-8 个，远未触及 Multi-Agent 的引入门槛（>10 工具 + 多业务域）。
-- 不选 Human-in-Loop（作为架构模式）：Agent 定位为"二线客服加速器"，输出供人工审核后使用，但审核发生在 Agent 流程之外（客服阅读报告后决定是否采纳），不是流程内的暂停-等待节点。HITL 是部署策略而非架构组件。
+- 不选 ReAct Loop：所有分支条件可编程表达，不需要 LLM 自主决定执行路径。ReAct 的开放循环引入不必要的不确定性，对确定性要求极高的金融排障场景是负面因素。
+- 不选 Multi-Agent：单一领域，7 工具在限额内（≤10），排障流程严格顺序依赖，无并行收益。
+- 不选独立 Critic Loop：验证已内嵌为 `skill_limit_calc_verify`（数学对账），额外 Critic 是冗余，增加 2× 延迟。
 
-**[ASSUMPTION]**：假设所有数据查询 API 是同步返回的（秒级响应），不需要异步等待机制。如果存在异步 API（如跨系统查询需要分钟级等待），需引入等待状态，架构可能演化为 ReAct + 异步回调。
+**[ASSUMPTION]**：假设所有数据查询 API 是同步返回的（秒级响应）。异步 API 需要引入等待状态。
 
 ---
 
 ## 2. 状态机设计
 
-### Think-Act-Observe 循环（额度排障定制版）
+### 分支状态机（对齐 PRD Appendix A）
 
 ```mermaid
 stateDiagram-v2
-    [*] --> 意图解析 : 接收客户问题
+    [*] --> IntentParsing : 客户问题输入
 
-    意图解析 --> 数据采集 : 识别出账户+时间区间+疑问类型
-    意图解析 --> 已失败 : 无法识别有效意图（缺少关键要素）
+    IntentParsing --> DataRetrieval : 识别为额度变化不连续
+    IntentParsing --> OutOfScope : 识别为超范围场景（CP-4）
 
-    数据采集 --> 推理分析 : 交易数据获取成功
-    数据采集 --> 错误恢复 : API 调用失败
+    DataRetrieval --> TransactionLocating : API 返回数据
+    DataRetrieval --> RetryDataRetrieval : API 失败
+    RetryDataRetrieval --> DataRetrieval : retry ≤ 2
+    RetryDataRetrieval --> Degraded : retry > 2
 
-    推理分析 --> 补充检索 : 发现数据缺口（需要更多交易详情/规则信息）
-    推理分析 --> 计算验证 : 归因推理完成，进入验证
-    推理分析 --> 已失败 : 推理循环超限（≥8 轮）或不可归因
+    TransactionLocating --> RuleMatching : 标记差异交易
+    TransactionLocating --> NoAnomaly : 无差异交易
 
-    补充检索 --> 推理分析 : 补充数据获取成功
-    补充检索 --> 错误恢复 : API 调用失败
+    RuleMatching --> SupplementRetrieval : 需要补充数据
+    RuleMatching --> CalcVerification : 规则匹配完成
+    RuleMatching --> HITL_UnknownCode : 遇到未知交易码（CP-1）
 
-    计算验证 --> 报告生成 : f(params) == 实际变化，验证通过
-    计算验证 --> 推理分析 : 验证不通过，重新分析
-    计算验证 --> 降级输出 : 验证反复不通过（≥3 次回退）
+    SupplementRetrieval --> CalcVerification : 补充数据获取成功
+    SupplementRetrieval --> RetryDataRetrieval : API 失败
 
-    报告生成 --> 已完成 : 输出排障报告+话术草稿
-    降级输出 --> 已完成 : 输出部分分析+[DEGRADED]标注+建议人工接手位置
+    CalcVerification --> ReportGeneration : verified = true
+    CalcVerification --> HITL_CalcFail : verified = false（CP-2）
 
-    错误恢复 --> 数据采集 : 可重试（Transient），重试≤3 次
-    错误恢复 --> 补充检索 : 可重试（Transient），从补充检索断点恢复
-    错误恢复 --> 已失败 : 不可重试（Auth/Permission）或重试超限
+    NoAnomaly --> ReportGeneration : 输出无异常报告
 
-    已完成 --> [*]
-    已失败 --> [*]
+    ReportGeneration --> HITL_Review : 输出报告+话术（CP-3）
+
+    HITL_Review --> Completed : 审核通过
+    HITL_Review --> FeedbackCapture : 审核修正
+    FeedbackCapture --> Completed : 修正记录写入评测集
+
+    HITL_UnknownCode --> RuleMatching : 业务人员补充规则后
+    HITL_CalcFail --> Completed : 业务人员确认系统异常
+
+    OutOfScope --> HITL_Transfer : 转业务人员人工
+    Degraded --> HITL_Transfer : 输出部分报告
+
+    Completed --> [*]
+    HITL_Transfer --> [*]
 ```
 
 ### 状态说明表
 
-| 状态 | 进入条件 | 退出条件（成功） | 退出条件（失败） | 超时 |
-|------|---------|----------------|----------------|------|
-| 意图解析 | 接收客户问题文本 | 提取出：账户类型、额度节点、时间区间、疑问类型 | 缺少 2 个以上关键要素 | 10s |
-| 数据采集 | 意图解析成功 | 获取到指定区间内的交易明细（含可用额度前后值） | API 返回错误 | 15s |
-| 推理分析 | 有交易数据可分析 | 完成偏差项识别和业务归因 | 循环 ≥8 轮仍无法归因 | 30s/轮 |
-| 补充检索 | 推理发现数据缺口 | 获取到补充数据 | API 返回错误 | 15s |
-| 计算验证 | 归因完成 | 计算结果与实际变化一致 | 3 次回退后仍不一致 | 10s |
-| 报告生成 | 验证通过 | 输出结构化报告 | — | 15s |
-| 降级输出 | 验证反复失败 | 输出部分结果+降级标注 | — | 10s |
-| 错误恢复 | API 调用失败 | 重试成功 | 不可重试或超限 | 按指数退避 |
+| 状态 | 进入条件 | 退出条件（成功） | 退出条件（失败/分支） | 超时 |
+|------|---------|----------------|---------------------|------|
+| IntentParsing | 接收客户问题（账户号+额度节点+问题描述+时间范围） | 提取出：问题类型、账户号、额度节点、时间范围 | 识别为超范围场景→OutOfScope | 10s |
+| DataRetrieval | 意图解析成功 | 获取到交易明细（含可用额度前后值） | API 失败→RetryDataRetrieval | 15s |
+| RetryDataRetrieval | API 调用失败 | 重试成功→DataRetrieval | retry>2→Degraded | 指数退避 |
+| TransactionLocating | 交易数据获取成功 | 标记 diff≠0 的差异交易→RuleMatching | 无差异交易→NoAnomaly | 10s |
+| RuleMatching | 存在差异交易 | 所有差异交易规则匹配完成→CalcVerification | 未知交易码→HITL_UnknownCode；需补充数据→SupplementRetrieval | 15s |
+| SupplementRetrieval | 规则匹配需要 CCA 交易详情 | 补充数据获取成功→CalcVerification | API 失败→RetryDataRetrieval | 15s |
+| CalcVerification | 规则匹配完成 | verified=true→ReportGeneration | verified=false→HITL_CalcFail | 10s |
+| ReportGeneration | 验证通过 或 无异常 | 输出报告→HITL_Review | — | 15s |
+| HITL_Review | 报告生成完成（CP-3 强制触发） | 审核通过→Completed | 审核修正→FeedbackCapture | 8h→标记「待审核」 |
+| HITL_UnknownCode | 交易码未命中规则库（CP-1） | 业务人员补充规则→RuleMatching | — | 4h→标记「待规则补充」 |
+| HITL_CalcFail | 计算验证不通过（CP-2） | 业务人员确认→Completed | — | 4h→升级开发排查 |
+| OutOfScope | 识别到超范围场景（CP-4） | →HITL_Transfer | — | — |
+| Degraded | API 重试超限 | 输出部分报告→HITL_Transfer | — | 5s |
+| FeedbackCapture | 审核修正 | 修正写入评测集→Completed | — | — |
 
 ### 终止条件
 
 ```
 【成功终止】
-条件：计算验证通过——Agent 推导的额度变化公式能精确还原客户感知的每一步额度值。
-输出：结构化排障报告（交易时间线+逐笔分析+归因说明+验证结果+话术草稿）。
+条件：CalcVerification verified=true 且 HITL_Review 审核通过。
+输出：结构化根因分析报告 + 客户解释话术草稿。
 
-【失败终止】
-条件 1 - 推理循环上限：推理分析↔补充检索 循环 ≥8 轮
-条件 2 - 验证回退上限：计算验证→推理分析 回退 ≥3 次
-条件 3 - 不可恢复错误：Auth/Permission 错误、账户不存在
-条件 4 - 总耗时上限：60s
+【HITL 终止】
+CP-1 未知交易码：暂停等待业务人员补充规则，补充后恢复 RuleMatching。
+CP-2 计算验证失败：标记为疑似系统异常，转业务人员确认。
+CP-3 输出审核：MVP 阶段强制触发，所有输出需审核。
+CP-4 超范围场景：识别后直接转交，Agent 不处理。
 
-【优雅降级】
-触发：验证反复不通过但有部分归因结果。
-输出：已完成的分析+未能解释的偏差项标注+建议人工排查方向。
+【降级终止】
+触发：API 重试超限（>2 次）。
+输出：已收集的原始数据 + 已完成的分析步骤 + 失败点描述。
+恢复时间目标：降级报告 5 秒内输出。
+
+【总耗时上限】
+120 秒（不含 HITL 等待时间），超时中止并输出部分报告。
 ```
+
+### HITL Checkpoint 设计（对齐 PRD Section 5）
+
+| Checkpoint | 触发条件 | 类型 | 人工决策内容 | 超时/默认动作 |
+|------------|---------|------|------------|-------------|
+| CP-1 | 交易码未命中规则库 | 确定性 | 补充业务规则解释 | 4h→标记「待规则补充」 |
+| CP-2 | expected ≠ actual 且差值 > 0.01 | 确定性 | 判定是否为系统异常 | 4h→升级开发排查 |
+| CP-3 | 每次排障完成 | 强制（MVP） | 确认报告准确性+话术可用性 | 8h→标记「待审核」 |
+| CP-4 | 识别到境外交易/汇率/临额等超范围场景 | 确定性 | 接管完整排障 | — |
+
+**Escalation 信息格式**：每个 checkpoint 提交 `{问题摘要, 已收集数据, 已完成分析, 需要人工决策的具体点, 可选方案}`，通过 `POST /api/escalation/{task_id}` 回调。
 
 ### 质量检查清单
 
-- [x] **所有状态可达**：从意图解析出发可达所有状态
-- [x] **所有状态有出口**：无死锁，每个非终态都有成功和失败出口
-- [x] **错误路径完整**：API 失败→错误恢复→重试/终止；推理超限→失败；验证不通过→降级
-- [x] **终止条件明确**：三类失败终止 + 一类降级终止 + 一类成功终止
-- [x] **超时机制存在**：每个状态有独立超时，总耗时 60s 上限
-- [x] **状态数量合规**：8 个状态（含 2 个终态），在 ReAct 推荐范围内（3-8）[待确认：降级输出是否应计入，当前含终态共 10 个节点，在上限 12 以内]
+- [x] **所有状态可达**：从 IntentParsing 出发可达所有 14 个状态
+- [x] **所有状态有出口**：无死锁，每个非终态都有至少一个出口
+- [x] **错误路径完整**：API 失败→重试→降级；未知交易码→HITL；验证失败→HITL；超范围→转交
+- [x] **终止条件明确**：成功终止（verified + 审核通过）、4 类 HITL 终止、降级终止
+- [x] **超时机制存在**：自动步骤秒级超时；HITL 步骤小时级超时+默认动作
+- [x] **状态数量合规**：14 个状态（含 2 个终态），在 DAG+HITL 推荐上限（12）附近。FeedbackCapture 和 NoAnomaly 为轻量过渡态，可接受。
 
 ---
 
@@ -122,97 +173,123 @@ stateDiagram-v2
 ### 层 1：常驻层（≤500 tokens 目标）
 
 ```
-角色：信用卡额度异动排障分析引擎。
-目标：给定客户额度疑问，还原交易区间内每笔交易的额度变化公式，输出根因分析和解释话术。
-约束：
-- 只读操作，不修改任何账户数据
-- 所有数值结论必须通过计算验证，禁止猜测
-- 无法归因时输出降级报告，不编造解释
-- 输出格式：结构化排障报告（见输出 schema）
-Harness 锚点：成功 = f(params) == 实际额度变化
+你是信用卡额度异常排障专家 Agent。
+
+角色：根据客户描述的额度变化疑问，自动完成数据检索→交易定位→规则匹配→计算验证→根因报告生成。
+
+输出格式：
+1. 根因分析报告（结构化 JSON）
+2. 客户解释话术（自然语言）
+
+绝对约束：
+- 禁止编造交易数据或业务规则，所有结论必须基于工具返回的实际数据
+- 计算验证不通过时，禁止输出「已解释」，必须标记为「待人工确认」
+- 遇到未知交易码，禁止猜测业务含义，必须触发 HITL
+- 每步操作必须记录到排障日志
+
+成功标准：Agent 推导的额度变化公式计算结果 = 实际额度变动值（误差 ≤ 0.01 元）
 ```
 
-### 层 2：按需加载层（Skills）
+### 层 2：按需加载层（Skills，对齐 PRD Section 7）
 
 | Skill | 描述（常驻） | 触发条件 | 预估 tokens |
 |-------|-------------|---------|------------|
-| `quota-continuity-check` | 同账户相邻交易可用额度连续性分析 | 检测到相邻交易额度不连续 | ~1500 |
-| `single-txn-analysis` | 单笔交易额度变化归因（交易码→业务含义→额度影响规则） | 单笔交易金额≠额度变化差值 | ~2000 |
-| `cross-account-analysis` | 跨账户额度影响分析（个人卡/分期卡/e招贷联动） | 涉及多账户类型 | ~1500 |
-| `hidden-factor-check` | 隐性额度变动因素排查（汇率、临额、授权过期） | 显性交易无法解释偏差 | ~1000 |
-| `explanation-template` | 客户解释话术生成模板 | 进入报告生成阶段 | ~800 |
+| `tx_code_rule_library` | 交易码→业务含义→额度使用规则的映射库 | 遇到需要匹配交易码业务含义时 | ~800 |
+| `overpayment_logic` | 溢缴款判定和额度影响逻辑 | 识别到贷方入账金额 > 欠款冲抵金额时 | ~400 |
+| `limit_recovery_rules` | 各交易类型对不同额度节点的额度恢复规则 | 需要判定交易是否恢复额度时 | ~600 |
+| `explanation_template` | 客户解释话术生成模板 | 生成客户解释话术时 | ~300 |
 
-**设计说明**：P1 调研识别的"隐性业务规则"问题通过 Skill 化解决——交易码→额度影响的映射关系、溢缴款规则等封装在 `single-txn-analysis` 中，而非硬编码在常驻层。这直接回应 harness_score.md 中 R1（知识断裂风险）。
+**v1.0→v2.0 变更**：移除 `cross-account-analysis` 和 `hidden-factor-check`——多账户联动和汇率/临额/授权过期均为 PRD 明确的 Out-of-scope（MVP），对应 CP-4 直接转交。Skill 从 5 个收窄到 4 个，与 MVP 范围严格对齐。
 
 ### 层 3：运行时注入层（≤200 tokens/轮）
 
-```python
-runtime_context = {
-    "trace_id": "{uuid}",           # 本次排障唯一标识
-    "timestamp": "{ISO8601}",       # 当前时间
-    "customer_id": "{脱敏ID}",      # 客户标识
-    "account_type": "{账户类型}",    # 从意图解析提取
-    "query_range": "{起止日期}",     # 从意图解析提取
-    "current_state": "{状态机状态}", # 当前所处状态
-    "loop_count": 0,                # 推理循环计数
-    "retry_count": 0                # 错误重试计数
-}
+```xml
+<runtime>
+  <task_id>{排障任务 ID}</task_id>
+  <customer_id>{客户号}</customer_id>
+  <account_id>{账户号}</account_id>
+  <account_type>{专享消费分期卡}</account_type>
+  <limit_node>{消费额度/非循环专享消费分期额度}</limit_node>
+  <time_range>{2025-12-20 ~ 2025-12-30}</time_range>
+  <problem_description>{客户原始问题描述}</problem_description>
+  <current_step>{当前排障步骤}</current_step>
+</runtime>
 ```
 
 ### 层 4：记忆层
 
-本 Agent 一期为**无状态设计**——每次排障独立执行，不跨会话积累经验。原因：一期聚焦单次排障正确性验证，记忆整合属于 P9 持续运营阶段的演进方向。
+| 记忆类型 | 存储 | 写入时机 | 读取时机 |
+|---------|------|---------|---------|
+| Working Memory（当前任务状态） | 任务状态文件（JSON） | 每个 Step 完成后 | 每个 Step 开始前 |
+| Procedural Memory（规则库更新） | Skills 文件 | CP-1 业务人员补充未知交易码规则后 | 规则匹配时按需加载 |
+| Error Memory（失败案例） | 评测集文件 | CP-2 或 FeedbackCapture 触发后 | 定期 eval 时批量加载 |
 
-[ASSUMPTION]：假设不需要跨工单的模式识别（如"最近一周同类问题激增"）。如果需要，则需引入情景记忆层。
+**v1.0→v2.0 变更**：从"一期无状态"改为"任务级有状态"。每步结果外化到任务状态文件（JSON），不依赖 LLM 上下文窗口传递中间状态。这确保 HITL 恢复后（如 CP-1 补充规则后回到 RuleMatching）Agent 能从断点继续，而非从头执行。
 
 ### 层 5：系统层（代码/Hook 执行）
 
 | 机制 | 实现方式 | 说明 |
 |------|---------|------|
+| 流程编排 | 确定性代码 | 状态机转换由代码控制，LLM 不决定执行路径 |
 | 输出格式校验 | JSON Schema 验证 | 排障报告必须符合 trace_schema |
-| 循环计数器 | 代码 Hook | 推理循环 ≥8 轮强制终止 |
-| 重试退避 | 代码 Hook | 指数退避，max 3 次 |
-| 总耗时熔断 | 代码 Hook | >60s 强制终止并输出当前结果 |
-| trace_id 注入 | Middleware | 所有 LLM 调用和工具调用挂载同一 trace_id |
 | 计算验证 | 确定性代码 | `f(params) == actual_change` 用代码执行，不让 LLM 做算术 |
+| 重试退避 | 代码 Hook | 指数退避，max 2 次（对齐 PRD） |
+| 总耗时熔断 | 代码 Hook | >120s 强制终止（不含 HITL 等待） |
+| trace_id 注入 | Middleware | 所有 LLM 调用和工具调用挂载同一 trace_id |
+| HITL 回调 | HTTP POST | `POST /api/escalation/{task_id}` 触发人工审核 |
+| 未知交易码检测 | 查表（确定性） | 交易码不在规则库→CP-1，不靠 prompt 规则 |
 
-**设计原则**：计算验证是本 Agent 的核心验收手段，必须在系统层用确定性代码执行。P0 案例中 `182344.58 - 15142.84 + 15142.84 - 3801.52 = 178543.06` 这类运算绝不能交给 LLM。
+**设计原则**："约束靠机制不靠期望"（反模式 AP-8）。计算验证、未知交易码检测、HITL 触发均为确定性代码逻辑，不依赖 LLM 遵循 prompt 指令。
 
 ---
 
-## 4. 工具链概览
+## 4. 工具链概览（MVP，对齐 PRD Section 6）
 
-基于 P1 综合调研识别的 API 和 SKILL 清单，定义如下工具集（详细 Schema 见 `tool_schema.json`）：
+| 工具 | 类别 | 操作类型 | 用途 | 对应步骤 |
+|------|------|---------|------|---------|
+| `query_limit_usage_detail` | API | Read | 额度使用明细查询（逐笔交易+额度变动） | Step 2 |
+| `query_cca_transaction_detail` | API | Read | CCA 交易详情（TCL 节点、冲抵金额等） | Step 5 |
+| `query_limit_view` | API | Read | 额度视图（各节点配置和额度值） | Step 5 |
+| `query_actual_available_limit` | API | Read | 账户实际可用额度（含所有影响因素） | Step 5 |
+| `skill_tx_continuity_check` | Skill | Compute | 交易连续性校验（逐笔 diff 计算） | Step 3 |
+| `skill_limit_rule_match` | Skill | Compute | 额度规则匹配（交易码→业务含义→规则） | Step 4 |
+| `skill_limit_calc_verify` | Skill | Compute | 额度计算验证（公式对账） | Step 6 |
 
-| 工具 | 类型 | 用途 | 对应状态 |
-|------|------|------|---------|
-| `parse_intent` | LLM 调用 | 从客户问题提取账户、时间区间、疑问类型 | 意图解析 |
-| `query_quota_usage_detail` | API | 额度使用明细查询 | 数据采集/补充检索 |
-| `query_transaction_detail` | API | CCA 运营管理交易详情查询 | 补充检索 |
-| `query_quota_view` | API | 额度视图查询 | 补充检索 |
-| `query_rate_history` | API | 汇率变更历史查询 | 补充检索 |
-| `query_temp_quota_history` | API | 临/固额变更历史查询 | 补充检索 |
-| `verify_calculation` | 确定性代码 | 额度变化公式计算验证 | 计算验证 |
-| `generate_report` | LLM 调用 | 生成排障报告和话术草稿 | 报告生成/降级输出 |
+**工具数量**：7 / 10 ✓
 
-工具数量：8 个，在 ReAct 推荐范围（5-10）内。
+**v1.0→v2.0 变更**：移除 `parse_intent`（意图识别改为内置能力，非独立工具）、`query_rate_history`、`query_temp_quota_history`（Out-of-scope）、`generate_report`（报告生成为内置能力）。收窄到 4 API + 3 Skill = 7 工具，与 PRD Section 6 一致。
+
+**v2 扩展预留**：`query_temp_limit_history`、`query_auth_expiry`（+2 = 9/10），在 Human Intervention Rate ≤ 20% 持续 4 周后引入。
 
 ---
 
 ## 5. 架构决策记录
 
-| 决策 | 选项 | 结论 | 理由 |
-|------|------|------|------|
-| 架构模式 | DAG / ReAct / Multi-Agent / HITL | ReAct Loop | 排障路径运行时动态决定，P0 案例证明存在推理驱动的循环检索 |
-| 计算验证执行层 | LLM / 代码 | 代码（系统层） | 数值精度零容忍，LLM 浮点运算不可靠 |
-| 业务规则存储 | RAG / Skill / 常驻层 | Skill（层 2） | 规则数量有限但需精确匹配，Skill 比 RAG 更确定性 |
-| 记忆层 | 有 / 无 | 一期无状态 | 先验证单次排障正确性，记忆整合是 P9 演进方向 |
-| HITL 定位 | 架构内节点 / 架构外审核 | 架构外审核 | Agent 输出完整报告供客服审核，审核不阻塞 Agent 执行 |
+| 决策 | 选项 | 结论 | 理由 | 版本 |
+|------|------|------|------|------|
+| 架构模式 | DAG / ReAct / Multi-Agent | **Workflow DAG + 条件分支** | 所有分支条件可编程表达（数值比较、查表、布尔判断），不需要 LLM 自主决定路径。v1.0 误判为 ReAct，已修正。 | v2.0 |
+| HITL 定位 | 架构内 / 架构外 | **架构内 4 个 checkpoint** | CP-1~CP-4 均为确定性触发，是 Supervised Autonomy 的架构保障，非可选部署策略。v1.0 误判为架构外，已修正。 | v2.0 |
+| 计算验证执行层 | LLM / 代码 | **代码（系统层）** | 数值精度零容忍，LLM 浮点运算不可靠 | v1.0 |
+| 业务规则存储 | RAG / Skill / 常驻层 | **Skill（层 2）** | 规则数量有限但需精确匹配，Skill 比 RAG 更确定性 | v1.0 |
+| 记忆层 | 无状态 / 任务级有状态 | **任务级有状态** | HITL 恢复需要断点续传，中间状态外化到 JSON 文件。v1.0"无状态"与 HITL 设计矛盾，已修正。 | v2.0 |
+| 流程编排控制 | LLM 决策 / 代码控制 | **代码控制** | DAG 模式下状态转换由确定性代码驱动，LLM 只负责语义理解环节（意图识别、规则匹配推理、话术生成） | v2.0 |
 
 ---
 
-## 6. 待确认项
+## 6. Autonomy 演进路径（对齐 PRD Section 12）
 
-- [待确认] API 响应时间：所有数据查询 API 是否均为同步秒级返回？异步 API 需要不同的状态设计。
-- [待确认] 工具权限：Agent 调用的所有 API 是否使用同一服务账号？不同权限边界会影响错误处理策略。
-- [待确认] 降级输出的价值：业务方是否接受部分分析结果？还是"全有或全无"？
+| 阶段 | Autonomy Level | 变化 | Gate |
+|------|---------------|------|------|
+| **MVP** | Supervised | CP-3 强制触发，所有输出需审核 | Gold Dataset ≥ 30，Pass@10 ≥ 80% |
+| **v2** | Expanded | CP-3 改为抽检（10% 随机 + 异常触发）；新增临额/授权过期场景 | HIR ≤ 20% 持续 4 周，Hallucination ≤ 3% |
+| **v3** | Full | 一线客服可用，Agent 输出直接交付 | Pass@10 ≥ 95% 持续 8 周，Hallucination ≤ 1%，HIR ≤ 5% |
+
+---
+
+## 7. 待确认项
+
+- [待确认] API 响应时间：所有数据查询 API 是否均为同步秒级返回？
+- [待确认] 工具权限：Agent 调用的所有 API 是否使用同一服务账号？
+- [待确认] 高频交易码覆盖率：4029/4306 等是否覆盖 MVP 场景 80%+ 的排障需求？
+- [待确认] Qwen 系列模型对中文信用卡业务领域的推理能力是否满足需求（需 benchmark）
+- [待确认] 排障日志存储方案与现有日志平台兼容性
