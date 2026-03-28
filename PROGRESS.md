@@ -32,8 +32,33 @@
 
 ---
 
+## 当前阶段：P3a 架构与 Schema
+
+**状态**：进行中
+**最后更新**：2026-03-28
+
+### 已完成
+
+- [x] `01-design/architecture.md` — 架构选型（ReAct Loop）+ 状态机 + 上下文五层分层
+
+### 待产出
+
+- [ ] `01-design/tool_schema.json` — 工具 Schema（含 Error Envelope），需通过 ACI 11 项检查
+- [ ] `01-design/trace_schema.json` — Trace Schema
+
+### P3a 退出契约检查
+
+| 条件 | 状态 |
+|------|------|
+| 架构选型走决策树并记录决策路径 | 已完成 |
+| Tool Schema 通过 ACI 11 项检查 | 未开始 |
+| 上下文结构覆盖五层 | 已完成 |
+| trace_schema.json 产出 | 未开始 |
+| **P3a 退出判定** | **未通过 — 2 项待产出** |
+
+---
+
 ## 后续阶段（未启动）
 
-- P3a 架构与 Schema — 前置：P0-P2 退出
 - P3b PRD & Eval 骨架 — 前置：P3a
 - P4+ — Claude Code 执行
