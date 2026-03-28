@@ -1,0 +1,1 @@
+/Users/zq/work/github/knowledge-work-plugins/myclaude/agentic-architect-plugin/skills/design-agent/references/state-machine-patterns.md
