@@ -35,11 +35,11 @@
 ## 当前阶段：P3a 架构与 Schema
 
 **状态**：进行中
-**最后更新**：2026-03-28
+**最后更新**：2026-03-29
 
 ### 已完成
 
-- [x] `01-design/architecture.md` — 架构选型（ReAct Loop）+ 状态机 + 上下文五层分层
+- [x] `01-design/architecture.md` v3.0 — 混合架构（Hybrid Orchestration）：外层 LangGraph 确定性状态机 + 内层 Claude Agent SDK 智能节点 + MCP 工具协议 + VFS 知识分层。经历 v1.0(ReAct) → v2.0(DAG+PRD修正) → v3.0(混合架构) 三轮迭代，决策路径完整记录于 architecture.md §8
 
 ### 待产出
 
@@ -50,7 +50,7 @@
 
 | 条件 | 状态 |
 |------|------|
-| 架构选型走决策树并记录决策路径 | 已完成 |
+| 架构选型走决策树并记录决策路径 | 已完成（v3.0 混合架构，含 8 项 ADR） |
 | Tool Schema 通过 ACI 11 项检查 | 未开始 |
 | 上下文结构覆盖五层 | 已完成 |
 | trace_schema.json 产出 | 未开始 |
