@@ -35,30 +35,39 @@
 ## 当前阶段：P3a 架构与 Schema
 
 **状态**：进行中
-**最后更新**：2026-03-29
+**最后更新**：2026-03-30
 
 ### 已完成
 
-- [x] `01-design/architecture.md` v3.0 — 混合架构（Hybrid Orchestration）：外层 LangGraph 确定性状态机 + 内层 Claude Agent SDK 智能节点 + MCP 工具协议 + VFS 知识分层。经历 v1.0(ReAct) → v2.0(DAG+PRD修正) → v3.0(混合架构) 三轮迭代，决策路径完整记录于 architecture.md §8
-
-### 待产出
-
-- [ ] `01-design/tool_schema.json` — 工具 Schema（含 Error Envelope），需通过 ACI 11 项检查
-- [ ] `01-design/trace_schema.json` — Trace Schema
+- [x] `01-design/architecture.md` v3.3 — 三层混合架构：控制层（LangGraph）+ 业务抽象层（5 Skill，对齐 PRD 7 步 Core Workflow）+ 执行层（Claude Agent SDK）+ MCP 工具协议。v3.2 核心变更：Skill 分解从技术视角修正为业务工作流视角。v3.3 核心变更：Step 4 Skill I/O Contract 显式声明 + SKILL_ROUTING 动态路由机制 + TECH-DEBT 重构触发信号表
+- [x] `01-design/tool_schema.json` v1.0 — 4 MCP Tool Schema（query_limit_usage_detail, query_cca_transaction_detail, query_limit_view, query_actual_available_limit）+ 统一 Error Envelope（6 类错误枚举），通过 ACI 11/11 项检查。[ASSUMPTION] tx_code/limit_node_type 枚举值待补充，后续写入 Skill 或 memory
+- [x] `01-design/trace_schema.json` v1.0 — Eval 消费为主的 Trace Schema：17 节点全覆盖、4 HITL 检查点、4 MCP Tool 对齐、eval_metadata 后处理字段。校验：节点覆盖 17/17、HITL CP 4/4、Tool 名称 4/4 对齐 tool_schema.json
 
 ### P3a 退出契约检查
 
 | 条件 | 状态 |
 |------|------|
-| 架构选型走决策树并记录决策路径 | 已完成（v3.0 混合架构，含 8 项 ADR） |
-| Tool Schema 通过 ACI 11 项检查 | 未开始 |
-| 上下文结构覆盖五层 | 已完成 |
-| trace_schema.json 产出 | 未开始 |
-| **P3a 退出判定** | **未通过 — 2 项待产出** |
+| 架构选型走决策树并记录决策路径 | ✅ 已完成（v3.3 三层混合架构，5 Skill 对齐 PRD Core Workflow + OCP 防腐设计） |
+| Tool Schema 通过 ACI 11 项检查 | ✅ 已完成（v1.0，11/11 通过） |
+| 上下文结构覆盖四层（Skill/运行时/记忆/系统） | ✅ 已完成 |
+| trace_schema.json 产出 | ✅ 已完成（v1.0，节点 17/17 + HITL 4/4 + Tool 4/4） |
+| **P3a 退出判定** | **✅ 通过** |
+
+---
+
+## 下一阶段：P3b PRD & Eval 骨架
+
+**状态**：未启动
+**前置**：P3a ✅ 已通过
+
+### 待产出
+
+- [ ] Eval 骨架：基于 trace_schema.json 定义 eval case 格式、gold dataset 结构、Pass@K 评分标准
+- [ ] PRD 更新：将 architecture.md v3.3 的变更（Skill Contract、SKILL_ROUTING、TECH-DEBT）同步至 PRD
+- [ ] Skill 文件 v0：至少产出 skill_limit_rule_match.md 的可执行初稿（P0 SOP trace 覆盖）
 
 ---
 
 ## 后续阶段（未启动）
 
-- P3b PRD & Eval 骨架 — 前置：P3a
 - P4+ — Claude Code 执行

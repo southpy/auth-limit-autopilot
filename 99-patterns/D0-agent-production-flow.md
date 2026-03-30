@@ -15,7 +15,7 @@ graph TD
     end
 
     %% Minimal Viable Eval
-    P4 --> V0[构建 V0 Trace 生成器<br>Read-Real / Write-Mock]
+    P4 --> V0[构建 V0 Trace 生成器]
     V0 -- 跑批真实语料 --> ManualSample[人工采样 20-30 条 Trace]
     ManualSample --> SanityCheck{验证 Eval Pass 逻辑}
 
@@ -26,6 +26,7 @@ graph TD
     P5 --> P6[Phase 6: V1 生产级编码 & 埋点]
     P6 --> P7{Phase 7: Offline Eval 驱动调优}
     P7 -- 未达标 --> P6
-    P7 -- 达标 --> P8[Phase 8: 渐进上线<br>Shadow → HITL → Canary → GA]
+    P7 -- 达标 --> P8[Phase 8: 渐进上线]
     P8 --> P9[Phase 9: 手动 Bad Case 捞取分析]
     P9 -. 回注 .-> P5
+```
