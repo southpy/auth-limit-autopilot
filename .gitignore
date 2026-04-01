@@ -2,3 +2,4 @@
 01-design/tool_schema.json
 01-design/trace_schema.json
 01-design/eval_criteria.py
+.claude/
